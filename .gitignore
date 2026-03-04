@@ -1,0 +1,19 @@
+node_modules/
+main.js
+
+# Claude Code
+.claude/
+CLAUDE.md
+*.jsonl
+
+# TLDR
+.tldr/
+.tldrignore
+
+# OS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~

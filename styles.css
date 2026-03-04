@@ -1,0 +1,12 @@
+@keyframes sync-projects-spin {
+	from {
+		transform: rotate(0deg);
+	}
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.sync-projects-spinning .svg-icon {
+	animation: sync-projects-spin 1s linear infinite;
+}

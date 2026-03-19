@@ -5,7 +5,8 @@
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
-		"build": "node esbuild.config.mjs production"
+		"build": "node esbuild.config.mjs production",
+		"dev:deploy": "node esbuild.config.mjs && node deploy.mjs"
 	},
 	"devDependencies": {
 		"@types/node": "^20.11.0",

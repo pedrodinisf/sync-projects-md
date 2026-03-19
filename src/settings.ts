@@ -43,6 +43,7 @@ export class SyncProjectsMdSettingTab extends PluginSettingTab {
 			async (value) => {
 				this.plugin.settings.destPath = value
 					.trim()
+					.replace(/\\/g, "/")
 					.replace(/^\/+|\/+$/g, "");
 				await this.plugin.saveSettings();
 				this.plugin.syncEngine.invalidateCache();

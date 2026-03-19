@@ -58,7 +58,7 @@ export class SyncModal extends Modal {
 			this.app,
 			this.localDestPath,
 			(value) => {
-				this.localDestPath = value.trim().replace(/^\/+|\/+$/g, "");
+				this.localDestPath = value.trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
 				this.clearPreview();
 			}
 		);

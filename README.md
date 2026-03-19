@@ -65,9 +65,12 @@ The settings tab is organized into sections:
 ### Development
 
 ```bash
-npm run dev    # watch mode with sourcemaps
-npm run build  # production build (minified, no sourcemaps)
+npm run dev          # dev build with sourcemaps
+npm run build        # production build (minified, no sourcemaps)
+npm run dev:deploy   # dev build + copy to local Obsidian vault for testing
 ```
+
+To use `dev:deploy`, edit the `DEST` path in `deploy.mjs` to point to your vault's plugin folder.
 
 ## Architecture
 
@@ -99,3 +102,4 @@ The scanner always skips: `.git`, `.svn`, `.hg`, `node_modules`, `.obsidian`, `_
 
 - Obsidian `>= 0.15.0`
 - Desktop only (requires Node.js `fs` and `path`)
+- Cross-platform: Windows, macOS, and Linux (path separators are normalized internally)

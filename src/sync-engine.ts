@@ -33,6 +33,11 @@ const COPY_BATCH_SIZE = 5;
 const SCAN_CONCURRENCY = 10;
 const CONFLICT_TOLERANCE_MS = 5000;
 
+/** Normalize an OS path to forward slashes (vault format). */
+function toVaultPath(p: string): string {
+	return p.replace(/\\/g, "/");
+}
+
 interface ScanOutput {
 	files: FileEntry[];
 	skipped: SkippedEntry[];
@@ -219,12 +224,31 @@ export class SyncEngine {
 		for (let i = 0; i < copyList.length; i += COPY_BATCH_SIZE) {
 			if (signal?.aborted) return result;
 			const batch = copyList.slice(i, i + COPY_BATCH_SIZE);
+
+			// Pre-create all needed folders sequentially before concurrent copies
 			const createdFolders = new Set<string>();
+			for (const entry of batch) {
+				const vaultPath = `${this.destPrefix}/${entry.relativePath}`;
+				const parts = vaultPath.split("/");
+				for (let j = 1; j < parts.length; j++) {
+					const folderPath = parts.slice(0, j).join("/");
+					if (!createdFolders.has(folderPath)) {
+						createdFolders.add(folderPath);
+						if (!this.vault.getAbstractFileByPath(folderPath)) {
+							try {
+								await this.vault.createFolder(folderPath);
+							} catch {
+								// Folder may already exist
+							}
+						}
+					}
+				}
+			}
 
 			await Promise.all(
 				batch.map(async (entry) => {
 					try {
-						await this.copyFile(entry, createdFolders);
+						await this.copyFile(entry);
 						this.destCache.set(entry.relativePath, Date.now());
 						result.copied++;
 						result.details.push(`Copied: ${entry.relativePath}`);
@@ -452,9 +476,8 @@ export class SyncEngine {
 			if (name.startsWith(".") || IGNORED_DIRS.has(name)) continue;
 
 			const fullPath = path.join(dirPath, name);
-			const relativePath = path.relative(
-				this.settings.sourcePath,
-				fullPath
+			const relativePath = toVaultPath(
+				path.relative(this.settings.sourcePath, fullPath)
 			);
 
 			if (dirent.isSymbolicLink()) {
@@ -544,31 +567,12 @@ export class SyncEngine {
 
 	// ── Copy ─────────────────────────────────────────────
 
-	private async copyFile(
-		entry: FileEntry,
-		createdFolders: Set<string>
-	): Promise<void> {
+	private async copyFile(entry: FileEntry): Promise<void> {
 		const sourceFull = path.join(
 			this.settings.sourcePath,
 			entry.relativePath
 		);
 		const vaultPath = `${this.destPrefix}/${entry.relativePath}`;
-
-		// Ensure parent folders exist in vault
-		const parts = vaultPath.split("/");
-		for (let i = 1; i < parts.length; i++) {
-			const folderPath = parts.slice(0, i).join("/");
-			if (!createdFolders.has(folderPath)) {
-				createdFolders.add(folderPath);
-				if (!this.vault.getAbstractFileByPath(folderPath)) {
-					try {
-						await this.vault.createFolder(folderPath);
-					} catch {
-						// Folder may already exist — race condition is fine
-					}
-				}
-			}
-		}
 
 		// Read source file with Node fs
 		const content = await fs.promises.readFile(sourceFull, "utf-8");

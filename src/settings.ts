@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type SyncProjectsMdPlugin from "./main";
+import { createFolderSuggest } from "./folder-suggest";
 
 export class SyncProjectsMdSettingTab extends PluginSettingTab {
 	plugin: SyncProjectsMdPlugin;
@@ -30,19 +31,23 @@ export class SyncProjectsMdSettingTab extends PluginSettingTab {
 					})
 			);
 
-		new Setting(containerEl)
-			.setName("Destination folder name")
-			.setDesc("Subfolder inside 1_PROJECTS/ in your vault")
-			.addText((text) =>
-				text
-					.setPlaceholder("mac_projects")
-					.setValue(this.plugin.settings.destFolderName)
-					.onChange(async (value) => {
-						this.plugin.settings.destFolderName = value.trim();
-						await this.plugin.saveSettings();
-						this.plugin.syncEngine.invalidateCache();
-					})
-			);
+		// Destination folder with suggest
+		const destSetting = new Setting(containerEl)
+			.setName("Destination folder")
+			.setDesc("Vault folder where synced files will be placed");
+
+		createFolderSuggest(
+			destSetting.controlEl,
+			this.app,
+			this.plugin.settings.destPath,
+			async (value) => {
+				this.plugin.settings.destPath = value
+					.trim()
+					.replace(/^\/+|\/+$/g, "");
+				await this.plugin.saveSettings();
+				this.plugin.syncEngine.invalidateCache();
+			}
+		);
 
 		// ── Project Selection ──────────────────────────────────
 		containerEl.createEl("h3", { text: "Project Selection" });
@@ -56,6 +61,16 @@ export class SyncProjectsMdSettingTab extends PluginSettingTab {
 		const projectContainer = containerEl.createDiv();
 		projectContainer.style.marginBottom = "12px";
 
+		// Search box
+		const searchRow = projectContainer.createDiv({
+			cls: "sync-project-search",
+		});
+		const searchInput = searchRow.createEl("input", {
+			type: "text",
+			placeholder: "Filter projects\u2026",
+		});
+		searchInput.addClass("sync-project-search-input");
+
 		// Buttons row
 		const btnRow = projectContainer.createDiv();
 		btnRow.style.marginBottom = "6px";
@@ -63,7 +78,9 @@ export class SyncProjectsMdSettingTab extends PluginSettingTab {
 		btnRow.style.gap = "8px";
 
 		const selectAllBtn = btnRow.createEl("button", { text: "Select all" });
-		const deselectAllBtn = btnRow.createEl("button", { text: "Deselect all" });
+		const deselectAllBtn = btnRow.createEl("button", {
+			text: "Deselect all",
+		});
 
 		// Scrollable checklist
 		const listEl = projectContainer.createDiv();
@@ -76,11 +93,17 @@ export class SyncProjectsMdSettingTab extends PluginSettingTab {
 		// Load projects asynchronously
 		this.plugin.syncEngine.listProjects().then((projects) => {
 			if (projects.length === 0) {
-				listEl.createEl("em", { text: "No projects found at source path" });
+				listEl.createEl("em", {
+					text: "No projects found at source path",
+				});
 				return;
 			}
 
-			const checkboxes: HTMLInputElement[] = [];
+			const rows: {
+				el: HTMLElement;
+				name: string;
+				cb: HTMLInputElement;
+			}[] = [];
 
 			for (const name of projects) {
 				const row = listEl.createDiv();
@@ -89,8 +112,11 @@ export class SyncProjectsMdSettingTab extends PluginSettingTab {
 				row.style.gap = "6px";
 				row.style.padding = "2px 0";
 
-				const cb = row.createEl("input", { type: "checkbox" }) as HTMLInputElement;
-				cb.checked = this.plugin.settings.includedProjects.includes(name);
+				const cb = row.createEl("input", {
+					type: "checkbox",
+				}) as HTMLInputElement;
+				cb.checked =
+					this.plugin.settings.includedProjects.includes(name);
 				row.createEl("span", { text: name });
 
 				cb.addEventListener("change", async () => {
@@ -104,28 +130,68 @@ export class SyncProjectsMdSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				});
 
-				checkboxes.push(cb);
+				rows.push({ el: row, name, cb });
 			}
+
+			// Search filter
+			searchInput.addEventListener("input", () => {
+				const query = searchInput.value.toLowerCase();
+				for (const row of rows) {
+					row.el.style.display = row.name
+						.toLowerCase()
+						.includes(query)
+						? "flex"
+						: "none";
+				}
+			});
 
 			selectAllBtn.addEventListener("click", async () => {
 				this.plugin.settings.includedProjects = [...projects];
-				for (const cb of checkboxes) cb.checked = true;
+				for (const row of rows) row.cb.checked = true;
 				await this.plugin.saveSettings();
 			});
 
 			deselectAllBtn.addEventListener("click", async () => {
 				this.plugin.settings.includedProjects = [];
-				for (const cb of checkboxes) cb.checked = false;
+				for (const row of rows) row.cb.checked = false;
 				await this.plugin.saveSettings();
 			});
 		});
+
+		// ── File Types ─────────────────────────────────────────
+		containerEl.createEl("h3", { text: "File Types" });
+
+		new Setting(containerEl)
+			.setName("File extensions to sync")
+			.setDesc(
+				"One extension per line (e.g. .md, .txt, .canvas). Text-based files only."
+			)
+			.addTextArea((textArea) =>
+				textArea
+					.setPlaceholder(".md\n.txt\n.canvas")
+					.setValue(
+						this.plugin.settings.syncFileExtensions.join("\n")
+					)
+					.onChange(async (value) => {
+						this.plugin.settings.syncFileExtensions = value
+							.split("\n")
+							.map((s) => s.trim())
+							.filter(
+								(s) => s.length > 0 && s.startsWith(".")
+							);
+						await this.plugin.saveSettings();
+						this.plugin.syncEngine.invalidateCache();
+					})
+			);
 
 		// ── Filtering ──────────────────────────────────────────
 		containerEl.createEl("h3", { text: "Filtering" });
 
 		new Setting(containerEl)
 			.setName("Exclude patterns")
-			.setDesc("Folder/file name patterns to exclude (one per line). Matches path prefixes.")
+			.setDesc(
+				"Folder/file name patterns to exclude (one per line). Matches path segments."
+			)
 			.addTextArea((textArea) =>
 				textArea
 					.setPlaceholder("drafts\narchive\ntmp")
@@ -153,7 +219,7 @@ export class SyncProjectsMdSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Max file size (KB)")
-			.setDesc("Skip .md files larger than this size")
+			.setDesc("Skip files larger than this size")
 			.addText((text) =>
 				text
 					.setPlaceholder("512")
@@ -210,6 +276,20 @@ export class SyncProjectsMdSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.deleteOrphans)
 					.onChange(async (value) => {
 						this.plugin.settings.deleteOrphans = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Conflict detection")
+			.setDesc(
+				"Flag files that were edited in both the source and the vault since last sync"
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.conflictDetection)
+					.onChange(async (value) => {
+						this.plugin.settings.conflictDetection = value;
 						await this.plugin.saveSettings();
 					})
 			);

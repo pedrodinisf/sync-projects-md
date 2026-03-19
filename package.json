@@ -1,6 +1,6 @@
 {
 	"name": "sync-projects-md",
-	"version": "2.0.0",
+	"version": "3.0.0",
 	"description": "Obsidian plugin to sync .md files from projects folder",
 	"main": "main.js",
 	"scripts": {

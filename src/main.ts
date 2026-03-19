@@ -2,6 +2,7 @@ import { Notice, Plugin } from "obsidian";
 import { PluginSettings, DEFAULT_SETTINGS, SyncResult } from "./types";
 import { SyncEngine } from "./sync-engine";
 import { SyncProjectsMdSettingTab } from "./settings";
+import { SyncModal } from "./sync-modal";
 
 export default class SyncProjectsMdPlugin extends Plugin {
 	settings: PluginSettings = DEFAULT_SETTINGS;
@@ -17,17 +18,19 @@ export default class SyncProjectsMdPlugin extends Plugin {
 		await this.loadSettings();
 		this.syncEngine = new SyncEngine(this.app.vault, this.settings);
 
-		// Ribbon icon
+		// Ribbon icon — opens the sync modal
 		this.ribbonIconEl = this.addRibbonIcon(
 			"refresh-cw",
 			"Sync Projects MD",
-			() => this.runSync()
+			() => new SyncModal(this.app, this).open()
 		);
 
 		// Status bar
 		this.statusBarEl = this.addStatusBarItem();
 		if (this.settings.lastSyncTimestamp > 0) {
-			this.updateStatus(`Last sync: ${this.formatTimestamp(this.settings.lastSyncTimestamp)}`);
+			this.updateStatus(
+				`Last sync: ${this.formatTimestamp(this.settings.lastSyncTimestamp)}`
+			);
 		} else {
 			this.updateStatus("Sync: ready");
 		}
@@ -35,20 +38,28 @@ export default class SyncProjectsMdPlugin extends Plugin {
 		// Settings tab
 		this.addSettingTab(new SyncProjectsMdSettingTab(this.app, this));
 
-		// Command palette
+		// Command palette — direct sync (no modal)
 		this.addCommand({
 			id: "sync-now",
 			name: "Sync now",
 			callback: () => this.runSync(),
 		});
 
+		this.addCommand({
+			id: "open-sync-modal",
+			name: "Open sync modal",
+			callback: () => new SyncModal(this.app, this).open(),
+		});
+
 		// Start auto-sync timer
 		this.restartTimer();
 
-		// Initial sync after Obsidian finishes loading
-		this.registerInterval(
-			window.setTimeout(() => this.runSync(), 3000) as unknown as number
-		);
+		// Initial sync after Obsidian finishes loading (only if configured)
+		if (this.settings.sourcePath && this.settings.destPath) {
+			this.registerInterval(
+				window.setTimeout(() => this.runSync(), 3000) as unknown as number
+			);
+		}
 	}
 
 	onunload(): void {
@@ -60,11 +71,22 @@ export default class SyncProjectsMdPlugin extends Plugin {
 	}
 
 	async loadSettings(): Promise<void> {
-		this.settings = Object.assign(
-			{},
-			DEFAULT_SETTINGS,
-			await this.loadData()
-		);
+		const data = await this.loadData();
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
+
+		// Migrate v2 → v3: destFolderName → destPath
+		if (!this.settings.destPath && this.settings.destFolderName) {
+			this.settings.destPath = `1_PROJECTS/${this.settings.destFolderName}`;
+			await this.saveData(this.settings);
+		}
+
+		// Ensure syncFileExtensions exists
+		if (
+			!this.settings.syncFileExtensions ||
+			this.settings.syncFileExtensions.length === 0
+		) {
+			this.settings.syncFileExtensions = [".md"];
+		}
 	}
 
 	async saveSettings(): Promise<void> {
@@ -74,7 +96,11 @@ export default class SyncProjectsMdPlugin extends Plugin {
 
 	restartTimer(): void {
 		this.clearTimer();
-		if (this.settings.autoSyncEnabled) {
+		if (
+			this.settings.autoSyncEnabled &&
+			this.settings.sourcePath &&
+			this.settings.destPath
+		) {
 			const ms = this.settings.syncIntervalMinutes * 60 * 1000;
 			this.timerHandle = setInterval(() => this.runSync(), ms);
 			this.registerInterval(this.timerHandle as unknown as number);
@@ -88,21 +114,27 @@ export default class SyncProjectsMdPlugin extends Plugin {
 		}
 	}
 
-	async runSync(): Promise<void> {
+	async runSync(overrideConflicts = false): Promise<void> {
 		if (this.isSyncing) return;
-		this.isSyncing = true;
 
+		if (!this.settings.destPath) {
+			new Notice("Sync Projects MD: destination folder is not set.");
+			return;
+		}
+
+		this.isSyncing = true;
 		this.abortController = new AbortController();
 		this.setSpinning(true);
-		this.updateStatus("Syncing...");
+		this.updateStatus("Syncing\u2026");
 
 		let result: SyncResult;
 		try {
 			result = await this.syncEngine.sync(
 				this.abortController.signal,
 				(current, total) => {
-					this.updateStatus(`Syncing ${current}/${total}...`);
-				}
+					this.updateStatus(`Syncing ${current}/${total}\u2026`);
+				},
+				overrideConflicts
 			);
 		} catch (e) {
 			this.updateStatus("Sync failed!");
@@ -120,7 +152,9 @@ export default class SyncProjectsMdPlugin extends Plugin {
 		this.settings.lastSyncTimestamp = Date.now();
 		await this.saveSettings();
 
-		this.updateStatus(`Last sync: ${this.formatTimestamp(this.settings.lastSyncTimestamp)}`);
+		this.updateStatus(
+			`Last sync: ${this.formatTimestamp(this.settings.lastSyncTimestamp)}`
+		);
 
 		// Notification
 		this.showResult(result);
@@ -130,13 +164,17 @@ export default class SyncProjectsMdPlugin extends Plugin {
 		const parts: string[] = [];
 		if (result.copied > 0) parts.push(`${result.copied} copied`);
 		if (result.deleted > 0) parts.push(`${result.deleted} deleted`);
+		if (result.conflicts > 0) parts.push(`${result.conflicts} conflicts`);
 		if (result.skipped > 0) parts.push(`${result.skipped} skipped`);
 		if (result.errors > 0) parts.push(`${result.errors} errors`);
 		if (parts.length === 0) parts.push("Already up to date");
 
 		const summary = `Sync: ${parts.join(", ")} (${result.elapsedMs}ms)`;
 
-		if (this.settings.verboseNotifications && result.details.length > 0) {
+		if (
+			this.settings.verboseNotifications &&
+			result.details.length > 0
+		) {
 			new Notice(
 				`${summary}\n${result.details.join("\n")}`,
 				10000
@@ -146,7 +184,7 @@ export default class SyncProjectsMdPlugin extends Plugin {
 		}
 	}
 
-	private formatTimestamp(ts: number): string {
+	formatTimestamp(ts: number): string {
 		const date = new Date(ts);
 		const now = new Date();
 		const time = date.toLocaleTimeString("en-GB", { hour12: false });

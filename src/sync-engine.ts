@@ -1,7 +1,15 @@
 import { Vault, TFile } from "obsidian";
 import * as fs from "fs";
 import * as path from "path";
-import { FileEntry, PluginSettings, SyncResult, OnProgress } from "./types";
+import {
+	FileEntry,
+	SkippedEntry,
+	PluginSettings,
+	SyncResult,
+	DryRunResult,
+	DryRunEntry,
+	OnProgress,
+} from "./types";
 
 const IGNORED_DIRS = new Set([
 	".git",
@@ -23,10 +31,18 @@ const IGNORED_DIRS = new Set([
 
 const COPY_BATCH_SIZE = 5;
 const SCAN_CONCURRENCY = 10;
+const CONFLICT_TOLERANCE_MS = 5000;
 
 interface ScanOutput {
 	files: FileEntry[];
-	skippedDetails: string[];
+	skipped: SkippedEntry[];
+}
+
+interface SyncPlan {
+	toCopy: FileEntry[];
+	toDelete: string[];
+	conflicts: FileEntry[];
+	skipped: SkippedEntry[];
 }
 
 export class SyncEngine {
@@ -50,7 +66,20 @@ export class SyncEngine {
 	}
 
 	private get destPrefix(): string {
-		return `1_PROJECTS/${this.settings.destFolderName}`;
+		return this.settings.destPath;
+	}
+
+	private hasMatchingExtension(filename: string): boolean {
+		const lower = filename.toLowerCase();
+		return this.settings.syncFileExtensions.some((ext) =>
+			lower.endsWith(ext.toLowerCase())
+		);
+	}
+
+	private isConflict(vaultMtime: number): boolean {
+		if (!this.settings.conflictDetection) return false;
+		if (this.settings.lastSyncTimestamp === 0) return false;
+		return vaultMtime > this.settings.lastSyncTimestamp + CONFLICT_TOLERANCE_MS;
 	}
 
 	/** List top-level project directories from sourcePath */
@@ -61,12 +90,16 @@ export class SyncEngine {
 			});
 			const projects: string[] = [];
 			for (const dirent of dirents) {
-				if (dirent.name.startsWith(".") || IGNORED_DIRS.has(dirent.name)) continue;
+				if (dirent.name.startsWith(".") || IGNORED_DIRS.has(dirent.name))
+					continue;
 				if (dirent.isDirectory()) {
 					projects.push(dirent.name);
 				} else if (dirent.isSymbolicLink()) {
 					try {
-						const fullPath = path.join(this.settings.sourcePath, dirent.name);
+						const fullPath = path.join(
+							this.settings.sourcePath,
+							dirent.name
+						);
 						const stat = await fs.promises.stat(fullPath);
 						if (stat.isDirectory()) {
 							projects.push(dirent.name);
@@ -82,56 +115,110 @@ export class SyncEngine {
 		}
 	}
 
-	async sync(signal?: AbortSignal, onProgress?: OnProgress): Promise<SyncResult> {
+	// ── Dry Run ──────────────────────────────────────────
+
+	async dryRun(): Promise<DryRunResult> {
+		if (!this.destPrefix) {
+			throw new Error("Destination path is not configured");
+		}
+		await this.validateSource();
+
+		const plan = await this.preparePlan();
+		const entries: DryRunEntry[] = [];
+
+		for (const f of plan.conflicts) {
+			entries.push({
+				relativePath: f.relativePath,
+				action: "conflict",
+				reason: "modified in both source and vault",
+			});
+		}
+
+		for (const f of plan.toCopy) {
+			const isNew = !this.destCache.has(f.relativePath);
+			entries.push({
+				relativePath: f.relativePath,
+				action: "copy",
+				reason: isNew ? "new file" : "source updated",
+			});
+		}
+
+		for (const relPath of plan.toDelete) {
+			entries.push({
+				relativePath: relPath,
+				action: "delete",
+				reason: "source removed",
+			});
+		}
+
+		for (const s of plan.skipped) {
+			entries.push({
+				relativePath: s.relativePath,
+				action: "skip",
+				reason: s.reason,
+			});
+		}
+
+		return {
+			entries,
+			toCopy: plan.toCopy.length,
+			toDelete: plan.toDelete.length,
+			conflicts: plan.conflicts.length,
+			skipped: plan.skipped.length,
+		};
+	}
+
+	// ── Sync ─────────────────────────────────────────────
+
+	async sync(
+		signal?: AbortSignal,
+		onProgress?: OnProgress,
+		overrideConflicts = false
+	): Promise<SyncResult> {
 		const start = Date.now();
 		const result: SyncResult = {
 			copied: 0,
 			deleted: 0,
 			skipped: 0,
+			conflicts: 0,
 			errors: 0,
 			elapsedMs: 0,
 			details: [],
 		};
 
-		// 1. Validate source path
-		try {
-			await fs.promises.access(this.settings.sourcePath, fs.constants.R_OK);
-		} catch {
-			throw new Error(`Source path not accessible: ${this.settings.sourcePath}`);
+		if (!this.destPrefix) {
+			throw new Error("Destination path is not configured");
 		}
 
+		await this.validateSource();
 		if (signal?.aborted) return result;
 
-		// 2. Scan source for .md files
-		const scanOutput = await this.scanSource(signal);
+		const plan = await this.preparePlan(signal);
 		if (signal?.aborted) return result;
 
-		const sourceFiles = scanOutput.files;
-		result.skipped = scanOutput.skippedDetails.length;
-		result.details.push(...scanOutput.skippedDetails);
-
-		// 3. Build dest cache on first run
-		if (!this.cacheBuilt) {
-			this.buildDestCache();
-			this.cacheBuilt = true;
+		// Skipped
+		result.skipped = plan.skipped.length;
+		for (const s of plan.skipped) {
+			result.details.push(`Skipped: ${s.relativePath} \u2014 ${s.reason}`);
 		}
 
-		// 4. Diff — find files to copy
-		const toCopy: FileEntry[] = [];
-		const sourceRelPaths = new Set<string>();
-
-		for (const entry of sourceFiles) {
-			sourceRelPaths.add(entry.relativePath);
-			const cachedMtime = this.destCache.get(entry.relativePath);
-			if (cachedMtime === undefined || entry.mtimeMs > cachedMtime) {
-				toCopy.push(entry);
+		// Build copy list
+		const copyList = [...plan.toCopy];
+		if (overrideConflicts) {
+			copyList.push(...plan.conflicts);
+		} else {
+			result.conflicts = plan.conflicts.length;
+			for (const f of plan.conflicts) {
+				result.details.push(
+					`Conflict: ${f.relativePath} \u2014 modified in both source and vault`
+				);
 			}
 		}
 
-		// 5. Copy in batches
-		for (let i = 0; i < toCopy.length; i += COPY_BATCH_SIZE) {
+		// Copy in batches
+		for (let i = 0; i < copyList.length; i += COPY_BATCH_SIZE) {
 			if (signal?.aborted) return result;
-			const batch = toCopy.slice(i, i + COPY_BATCH_SIZE);
+			const batch = copyList.slice(i, i + COPY_BATCH_SIZE);
 			const createdFolders = new Set<string>();
 
 			await Promise.all(
@@ -143,56 +230,106 @@ export class SyncEngine {
 						result.details.push(`Copied: ${entry.relativePath}`);
 					} catch (e) {
 						result.errors++;
-						result.details.push(`Error copying ${entry.relativePath}: ${e}`);
+						result.details.push(
+							`Error copying ${entry.relativePath}: ${e}`
+						);
 					}
 				})
 			);
 
 			if (onProgress) {
-				onProgress(result.copied + result.errors, toCopy.length);
+				onProgress(result.copied + result.errors, copyList.length);
 			}
 
-			// Yield to event loop between batches
-			if (i + COPY_BATCH_SIZE < toCopy.length) {
+			if (i + COPY_BATCH_SIZE < copyList.length) {
 				await sleep(0);
 			}
 		}
 
-		// 6. Orphan deletion
-		if (this.settings.deleteOrphans) {
-			for (const [relPath] of this.destCache) {
-				if (signal?.aborted) return result;
-				if (!sourceRelPaths.has(relPath)) {
-					try {
-						const vaultPath = `${this.destPrefix}/${relPath}`;
-						const file = this.vault.getAbstractFileByPath(vaultPath);
-						if (file instanceof TFile) {
-							await this.vault.delete(file);
-							this.destCache.delete(relPath);
-							result.deleted++;
-							result.details.push(`Deleted orphan: ${relPath}`);
-						}
-					} catch (e) {
-						result.errors++;
-						result.details.push(`Error deleting ${relPath}: ${e}`);
-					}
+		// Delete orphans
+		for (const relPath of plan.toDelete) {
+			if (signal?.aborted) return result;
+			try {
+				const vaultPath = `${this.destPrefix}/${relPath}`;
+				const file = this.vault.getAbstractFileByPath(vaultPath);
+				if (file instanceof TFile) {
+					await this.vault.delete(file);
+					this.destCache.delete(relPath);
+					result.deleted++;
+					result.details.push(`Deleted orphan: ${relPath}`);
 				}
+			} catch (e) {
+				result.errors++;
+				result.details.push(`Error deleting ${relPath}: ${e}`);
 			}
 		}
 
 		result.elapsedMs = Date.now() - start;
-
-		// 7. Write sync log
 		await this.writeLog(result);
-
 		return result;
 	}
 
+	// ── Plan ─────────────────────────────────────────────
+
+	private async validateSource(): Promise<void> {
+		try {
+			await fs.promises.access(
+				this.settings.sourcePath,
+				fs.constants.R_OK
+			);
+		} catch {
+			throw new Error(
+				`Source path not accessible: ${this.settings.sourcePath}`
+			);
+		}
+	}
+
+	private async preparePlan(signal?: AbortSignal): Promise<SyncPlan> {
+		const scanOutput = await this.scanSource(signal);
+
+		if (!this.cacheBuilt) {
+			this.buildDestCache();
+			this.cacheBuilt = true;
+		}
+
+		const toCopy: FileEntry[] = [];
+		const conflicts: FileEntry[] = [];
+		const sourceRelPaths = new Set<string>();
+
+		for (const entry of scanOutput.files) {
+			sourceRelPaths.add(entry.relativePath);
+			const cachedMtime = this.destCache.get(entry.relativePath);
+
+			if (cachedMtime === undefined) {
+				toCopy.push(entry);
+			} else if (entry.mtimeMs > cachedMtime) {
+				if (this.isConflict(cachedMtime)) {
+					conflicts.push(entry);
+				} else {
+					toCopy.push(entry);
+				}
+			}
+		}
+
+		const toDelete: string[] = [];
+		if (this.settings.deleteOrphans) {
+			for (const [relPath] of this.destCache) {
+				if (relPath === "sync-log.md") continue;
+				if (!sourceRelPaths.has(relPath)) {
+					toDelete.push(relPath);
+				}
+			}
+		}
+
+		return { toCopy, toDelete, conflicts, skipped: scanOutput.skipped };
+	}
+
+	// ── Scan ─────────────────────────────────────────────
+
 	private async scanSource(signal?: AbortSignal): Promise<ScanOutput> {
 		const files: FileEntry[] = [];
-		const skippedDetails: string[] = [];
+		const skipped: SkippedEntry[] = [];
 
-		// Read top-level directories and apply project filter
 		let topLevelDirs: string[];
 		try {
 			const dirents = await fs.promises.readdir(this.settings.sourcePath, {
@@ -200,24 +337,29 @@ export class SyncEngine {
 			});
 			topLevelDirs = [];
 			for (const dirent of dirents) {
-				if (dirent.name.startsWith(".") || IGNORED_DIRS.has(dirent.name)) continue;
+				if (
+					dirent.name.startsWith(".") ||
+					IGNORED_DIRS.has(dirent.name)
+				)
+					continue;
 
-				const fullPath = path.join(this.settings.sourcePath, dirent.name);
+				const fullPath = path.join(
+					this.settings.sourcePath,
+					dirent.name
+				);
 				let isDir = dirent.isDirectory();
 
-				// Handle symlinks
 				if (dirent.isSymbolicLink()) {
 					if (this.settings.skipSymlinks) continue;
 					try {
 						const stat = await fs.promises.stat(fullPath);
 						isDir = stat.isDirectory();
 					} catch {
-						continue; // Broken symlink
+						continue;
 					}
 				}
 
 				if (isDir) {
-					// Apply project filter
 					if (
 						this.settings.includedProjects.length > 0 &&
 						!this.settings.includedProjects.includes(dirent.name)
@@ -225,16 +367,27 @@ export class SyncEngine {
 						continue;
 					}
 					topLevelDirs.push(fullPath);
-				} else if (dirent.isFile() && dirent.name.endsWith(".md")) {
+				} else if (
+					dirent.isFile() &&
+					this.hasMatchingExtension(dirent.name)
+				) {
 					const relativePath = dirent.name;
 					if (!this.isExcluded(relativePath)) {
 						try {
 							const stat = await fs.promises.stat(fullPath);
-							if (stat.size > this.settings.maxFileSizeKB * 1024) {
-								const sizeKB = Math.round(stat.size / 1024);
-								skippedDetails.push(`Skipped (too large): ${relativePath} (${sizeKB} KB)`);
+							if (
+								stat.size >
+								this.settings.maxFileSizeKB * 1024
+							) {
+								skipped.push({
+									relativePath,
+									reason: `too large (${Math.round(stat.size / 1024)} KB)`,
+								});
 							} else {
-								files.push({ relativePath, mtimeMs: stat.mtimeMs });
+								files.push({
+									relativePath,
+									mtimeMs: stat.mtimeMs,
+								});
 							}
 						} catch {
 							// Skip unreadable files
@@ -243,20 +396,19 @@ export class SyncEngine {
 				}
 			}
 		} catch {
-			return { files, skippedDetails };
+			return { files, skipped };
 		}
 
-		// Scan each top-level project directory
 		const queue: string[] = [...topLevelDirs];
 
 		while (queue.length > 0) {
-			if (signal?.aborted) return { files, skippedDetails };
+			if (signal?.aborted) return { files, skipped };
 
 			const batch = queue.splice(0, SCAN_CONCURRENCY);
 			const batchResults = await Promise.all(
 				batch.map(async (dir) => {
 					try {
-						return await this.scanDir(dir, skippedDetails);
+						return await this.scanDir(dir, skipped);
 					} catch {
 						return { subdirs: [], files: [] };
 					}
@@ -269,14 +421,13 @@ export class SyncEngine {
 			}
 		}
 
-		return { files, skippedDetails };
+		return { files, skipped };
 	}
 
 	private isExcluded(relativePath: string): boolean {
 		const segments = relativePath.split("/");
 		for (const pattern of this.settings.excludePatterns) {
 			if (!pattern) continue;
-			// Match any path segment exactly, or match as a path prefix
 			if (segments.some((seg) => seg === pattern)) return true;
 			if (relativePath.startsWith(pattern + "/")) return true;
 		}
@@ -285,7 +436,7 @@ export class SyncEngine {
 
 	private async scanDir(
 		dirPath: string,
-		skippedDetails: string[]
+		skipped: SkippedEntry[]
 	): Promise<{ subdirs: string[]; files: FileEntry[] }> {
 		const subdirs: string[] = [];
 		const files: FileEntry[] = [];
@@ -298,14 +449,14 @@ export class SyncEngine {
 
 		for (const dirent of dirents) {
 			const name = dirent.name;
-
-			// Skip hidden files/dirs and ignored directories
 			if (name.startsWith(".") || IGNORED_DIRS.has(name)) continue;
 
 			const fullPath = path.join(dirPath, name);
-			const relativePath = path.relative(this.settings.sourcePath, fullPath);
+			const relativePath = path.relative(
+				this.settings.sourcePath,
+				fullPath
+			);
 
-			// Handle symlinks
 			if (dirent.isSymbolicLink()) {
 				if (this.settings.skipSymlinks) continue;
 				try {
@@ -314,33 +465,48 @@ export class SyncEngine {
 						if (!this.isExcluded(relativePath)) {
 							subdirs.push(fullPath);
 						}
-					} else if (stat.isFile() && name.endsWith(".md")) {
+					} else if (
+						stat.isFile() &&
+						this.hasMatchingExtension(name)
+					) {
 						if (!this.isExcluded(relativePath)) {
-							if (stat.size > this.settings.maxFileSizeKB * 1024) {
-								const sizeKB = Math.round(stat.size / 1024);
-								skippedDetails.push(`Skipped (too large): ${relativePath} (${sizeKB} KB)`);
+							if (
+								stat.size >
+								this.settings.maxFileSizeKB * 1024
+							) {
+								skipped.push({
+									relativePath,
+									reason: `too large (${Math.round(stat.size / 1024)} KB)`,
+								});
 							} else {
-								files.push({ relativePath, mtimeMs: stat.mtimeMs });
+								files.push({
+									relativePath,
+									mtimeMs: stat.mtimeMs,
+								});
 							}
 						}
 					}
 				} catch {
-					// Broken symlink — skip
+					// Broken symlink
 				}
 				continue;
 			}
 
-			// Check exclude patterns
 			if (this.isExcluded(relativePath)) continue;
 
 			if (dirent.isDirectory()) {
 				subdirs.push(fullPath);
-			} else if (dirent.isFile() && name.endsWith(".md")) {
+			} else if (dirent.isFile() && this.hasMatchingExtension(name)) {
 				statPromises.push(
 					fs.promises.stat(fullPath).then((stat) => {
-						if (stat.size > this.settings.maxFileSizeKB * 1024) {
-							const sizeKB = Math.round(stat.size / 1024);
-							skippedDetails.push(`Skipped (too large): ${relativePath} (${sizeKB} KB)`);
+						if (
+							stat.size >
+							this.settings.maxFileSizeKB * 1024
+						) {
+							skipped.push({
+								relativePath,
+								reason: `too large (${Math.round(stat.size / 1024)} KB)`,
+							});
 							return;
 						}
 						files.push({
@@ -356,18 +522,27 @@ export class SyncEngine {
 		return { subdirs, files };
 	}
 
+	// ── Cache ────────────────────────────────────────────
+
 	private buildDestCache(): void {
 		this.destCache.clear();
+		if (!this.destPrefix) return;
+
 		const prefix = this.destPrefix + "/";
 		const allFiles = this.vault.getFiles();
 
 		for (const file of allFiles) {
-			if (file.path.startsWith(prefix) && file.path.endsWith(".md")) {
+			if (
+				file.path.startsWith(prefix) &&
+				this.hasMatchingExtension(file.path)
+			) {
 				const relativePath = file.path.slice(prefix.length);
 				this.destCache.set(relativePath, file.stat.mtime);
 			}
 		}
 	}
+
+	// ── Copy ─────────────────────────────────────────────
 
 	private async copyFile(
 		entry: FileEntry,
@@ -407,9 +582,17 @@ export class SyncEngine {
 		}
 	}
 
+	// ── Log ──────────────────────────────────────────────
+
 	private async writeLog(result: SyncResult): Promise<void> {
 		if (!this.settings.syncLogEnabled) return;
-		if (result.copied === 0 && result.deleted === 0 && result.errors === 0) return;
+		if (
+			result.copied === 0 &&
+			result.deleted === 0 &&
+			result.conflicts === 0 &&
+			result.errors === 0
+		)
+			return;
 
 		const now = new Date();
 		const timestamp = now.toISOString().replace("T", " ").slice(0, 19);
@@ -417,6 +600,7 @@ export class SyncEngine {
 		let entry = `## ${timestamp}\n`;
 		entry += `- Copied: ${result.copied}\n`;
 		entry += `- Deleted: ${result.deleted}\n`;
+		entry += `- Conflicts: ${result.conflicts}\n`;
 		entry += `- Skipped: ${result.skipped}\n`;
 		entry += `- Errors: ${result.errors}\n`;
 		entry += `- Duration: ${result.elapsedMs}ms\n`;
@@ -437,7 +621,6 @@ export class SyncEngine {
 			const existing = this.vault.getAbstractFileByPath(logPath);
 			if (existing instanceof TFile) {
 				const content = await this.vault.read(existing);
-				// Prepend new entry after the header so newest is first
 				const firstEntry = content.indexOf("\n## ");
 				if (firstEntry >= 0) {
 					const before = content.slice(0, firstEntry + 1);

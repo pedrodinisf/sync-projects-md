@@ -1,3 +1,5 @@
+/* ── Spinning ribbon icon ───────────────────────────── */
+
 @keyframes sync-projects-spin {
 	from {
 		transform: rotate(0deg);
@@ -9,4 +11,221 @@
 
 .sync-projects-spinning .svg-icon {
 	animation: sync-projects-spin 1s linear infinite;
+}
+
+/* ── Modal ──────────────────────────────────────────── */
+
+.sync-projects-modal {
+	max-width: 600px;
+}
+
+.sync-projects-modal h2 {
+	margin-top: 0;
+	margin-bottom: 4px;
+}
+
+.sync-modal-last-sync {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	margin-top: 0;
+	margin-bottom: 16px;
+}
+
+.sync-modal-field {
+	margin-bottom: 12px;
+}
+
+.sync-modal-label {
+	display: block;
+	font-weight: 600;
+	margin-bottom: 2px;
+}
+
+.sync-modal-desc {
+	display: block;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+	margin-bottom: 6px;
+}
+
+/* ── Folder suggest ─────────────────────────────────── */
+
+.setting-item-control:has(.sync-folder-suggest) {
+	overflow: visible;
+}
+
+.sync-folder-suggest {
+	position: relative;
+	overflow: visible;
+}
+
+.sync-folder-input {
+	width: 100%;
+	padding: 6px 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background: var(--background-primary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-medium);
+}
+
+.sync-folder-input:focus {
+	border-color: var(--interactive-accent);
+	outline: none;
+}
+
+.sync-folder-dropdown {
+	position: absolute;
+	top: 100%;
+	left: 0;
+	right: 0;
+	max-height: 200px;
+	overflow-y: auto;
+	background: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-top: none;
+	border-radius: 0 0 4px 4px;
+	z-index: var(--layer-popover);
+	box-shadow: var(--shadow-s);
+}
+
+.sync-folder-item {
+	padding: 4px 8px;
+	cursor: pointer;
+	font-size: var(--font-ui-small);
+}
+
+.sync-folder-item:hover {
+	background: var(--background-modifier-hover);
+}
+
+.sync-folder-more {
+	color: var(--text-muted);
+	font-style: italic;
+	cursor: default;
+}
+
+.sync-folder-more:hover {
+	background: none;
+}
+
+/* ── Project search ─────────────────────────────────── */
+
+.sync-project-search {
+	margin-bottom: 6px;
+}
+
+.sync-project-search-input {
+	width: 100%;
+	padding: 4px 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background: var(--background-primary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+}
+
+.sync-project-search-input:focus {
+	border-color: var(--interactive-accent);
+	outline: none;
+}
+
+/* ── Preview ────────────────────────────────────────── */
+
+.sync-preview {
+	margin-top: 12px;
+}
+
+.sync-preview-loading {
+	color: var(--text-muted);
+	font-style: italic;
+}
+
+.sync-preview-error {
+	color: var(--text-error);
+}
+
+.sync-preview-empty {
+	color: var(--text-muted);
+}
+
+.sync-preview-list {
+	max-height: 250px;
+	overflow-y: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	padding: 6px;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+}
+
+.sync-preview-row {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	padding: 2px 0;
+	line-height: 1.4;
+}
+
+.sync-preview-icon {
+	flex-shrink: 0;
+	width: 16px;
+	text-align: center;
+	font-weight: bold;
+}
+
+.sync-preview-path {
+	word-break: break-all;
+}
+
+.sync-preview-reason {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	flex-shrink: 0;
+}
+
+.sync-action-copy .sync-preview-icon {
+	color: var(--text-success, #08b94e);
+}
+
+.sync-action-delete .sync-preview-icon {
+	color: var(--text-error, #e93147);
+}
+
+.sync-action-conflict .sync-preview-icon {
+	color: var(--text-warning, #e0a000);
+}
+
+.sync-action-skip .sync-preview-icon {
+	color: var(--text-muted);
+}
+
+.sync-preview-more {
+	color: var(--text-muted);
+	font-style: italic;
+	padding: 4px 0;
+}
+
+.sync-preview-summary {
+	margin-top: 8px;
+}
+
+.sync-summary-text {
+	font-weight: 600;
+	margin-bottom: 4px;
+}
+
+/* ── Modal buttons ──────────────────────────────────── */
+
+.sync-modal-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 16px;
+	padding-top: 12px;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.sync-modal-btn {
+	min-width: 80px;
 }

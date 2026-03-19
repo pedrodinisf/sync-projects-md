@@ -1,7 +1,7 @@
 {
 	"id": "sync-projects-md",
 	"name": "Sync Projects MD",
-	"version": "2.0.0",
+	"version": "3.0.0",
 	"minAppVersion": "0.15.0",
 	"description": "Mirrors .md files from a source projects folder into your vault, preserving folder structure.",
 	"author": "Pedro",
